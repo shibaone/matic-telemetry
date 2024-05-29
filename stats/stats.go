@@ -78,52 +78,46 @@ type authMsg struct {
 	Secret string   `json:"secret"`
 }
 
-func Dailer(cfg *config.Config) error {
-	errTimer := time.NewTimer(0)
-	defer errTimer.Stop()
-	for {
+func Dialer(cfg *config.Config) error {
+	// Use a ticker instead of a timer to handle both initial and subsequent connection attempts
+	retryTicker := time.NewTicker(10 * time.Second)
+	defer retryTicker.Stop()
+
+	for range retryTicker.C {
 		// Resolve the URL, defaulting to TLS, but falling back to none too
 		path := fmt.Sprintf("ws://%s/api", cfg.StatsDetails.NetStatsIPAddress)
 		urls := []string{path}
-		var (
-			conn *connWrapper
-			err  error
-		)
 
 		dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
 		header := make(http.Header)
-
 		header.Set("origin", "http://localhost")
+
 		for _, url := range urls {
-			c, _, e := dialer.Dial(url, header)
-			err = e
-			if err == nil {
-				conn = newConnectionWrapper(c)
-				break
+			c, _, err := dialer.Dial(url, header)
+			if err != nil {
+				log.Printf("Failed to connect to stats server at %s: %v", url, err)
+				continue
 			}
-		}
 
-		if err != nil {
-			log.Printf("Stats server unreachable : %v", err)
-			errTimer.Reset(10 * time.Second)
-			continue
-		}
+			conn := newConnectionWrapper(c)
+			defer conn.conn.Close()
 
-		if err = login(conn, cfg); err != nil {
-			log.Printf("Stats login failed : %v", err)
-			conn.conn.Close()
-			errTimer.Reset(10 * time.Second)
-			continue
-		}
+			if err := login(conn, cfg); err != nil {
+				log.Printf("Stats login failed: %v", err)
+				continue
+			}
 
-		// Send the initial stats so our node looks decent from the get go
-		if err = report(conn, cfg); err != nil {
-			log.Printf("Initial stats report failed : %v", err)
+			// Send the initial stats so our node looks decent from the get-go
+			if err := report(conn, cfg); err != nil {
+				log.Printf("Initial stats report failed: %v", err)
+			}
+
+			// Connection succeeded, break the loop and wait for the next retry tick
+			return nil
 		}
-		// Close the current connection and establish a new one
-		conn.conn.Close()
-		errTimer.Reset(0)
 	}
+
+	return nil // Never reached due to the infinite loop, added for completeness
 }
 
 // WriteJSON wraps corresponding method on the websocket but is safe for concurrent calling
@@ -188,7 +182,7 @@ func login(conn *connWrapper, cfg *config.Config) error {
 	// Retrieve the remote ack or connection termination
 	var ack map[string][]string
 	if err := conn.ReadJSON(&ack); err != nil || len(ack["emit"]) != 1 || ack["emit"][0] != "ready" {
-		return errors.New("unauthorized")
+		return errors.New(err.Error())
 	}
 	return nil
 }
